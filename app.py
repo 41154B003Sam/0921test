@@ -1,6 +1,8 @@
 import io
 import os
 import sys
+import json
+import requests
 from dotenv import load_dotenv
 from flask import Flask, request, abort, jsonify
 
@@ -41,6 +43,8 @@ load_dotenv(override=True)
 channel_secret = os.getenv("LINE_CHANNEL_SECRET")
 channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 gemini_api_key = os.getenv("GEMINI_API_KEY")
+ollama_api_url = os.getenv("OLLAMA_API_URL", "http://localhost:11434")
+local_model_name = os.getenv("LOCAL_MODEL_NAME", "qwen2.5:3b")
 port = int(os.getenv("PORT", 5000))
 
 app = Flask(__name__)
@@ -53,7 +57,7 @@ configuration = (
     else None
 )
 
-# Gemini AI 客戶端
+# Gemini AI 雲端備援客戶端
 gemini_client = genai.Client(api_key=gemini_api_key) if gemini_api_key else None
 
 
@@ -74,8 +78,96 @@ def send_line_reply(reply_token: str, message_text: str):
         app.logger.error(f"傳送 LINE 回覆訊息失敗: {err}")
 
 
+def format_reply_text(text: str) -> str:
+    """後處理：移除 Markdown 粗體星號，並在 500 字上限內進行標點符號安全截斷"""
+    if not text:
+        return ""
+    text = text.strip().replace("**", "")
+    if len(text) > 500:
+        truncated = text[:495]
+        last_punct = max(
+            truncated.rfind("。"),
+            truncated.rfind("！"),
+            truncated.rfind("？"),
+            truncated.rfind("\n"),
+        )
+        if last_punct > 250:
+            text = truncated[: last_punct + 1]
+        else:
+            text = truncated + "..."
+    return text
+
+
+def search_web_context(query: str, max_results: int = 2) -> str:
+    """即時網際網路搜尋：爬取最新網路資訊與新聞摘要 (Search Grounding)"""
+    try:
+        from ddgs import DDGS
+
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+            if not results:
+                return ""
+            snippets = []
+            for r in results:
+                title = r.get("title", "").strip()
+                body = r.get("body", "").strip()
+                if title or body:
+                    snippets.append(f"• {title}: {body}")
+            return "\n".join(snippets)
+    except Exception as e:
+        app.logger.warning(f"即時聯網搜尋暫時無法取得結果: {e}")
+        return ""
+
+
+def ask_local_qwen(user_message: str, web_context: str = "") -> str:
+    """
+    第一優先：呼叫本機運行的 Ollama Qwen 2.5 3B 模型
+    - 運行於本機 RTX 3050 GPU (4GB VRAM)，完全免費無額度上限
+    - 結合即時聯網搜尋資料，突破知識截止年份限制
+    """
+    system_prompt = (
+        "你是一個聰明、熱心且幽默有禮的 LINE 個人智慧助理，名字叫做「智聊小精靈」。"
+        "你目前運行於使用者的本地 GPU (RTX 3050) 上，並具備即時網際網路檢索能力。"
+        "請一律使用繁體中文（台灣習慣語境）回覆。\n"
+        "【排版與長度規則】\n"
+        "1. 回覆總長度控制在 200 至 450 字之間（最長絕對不可超過 500 字）。\n"
+        "2. 務必在限制長度內將語意完整表達完畢，以句號結束，切勿中途斷頭。\n"
+        "3. 請勿使用 Markdown 的雙星號粗體標籤（例如 **文字**），請改用自然換行或 Emoji 呈現。\n"
+        "4. 若有提供即時網路搜尋資料，請依據最新資訊回答，確保時效性。"
+    )
+
+    content = user_message
+    if web_context:
+        content = (
+            f"【即時網路搜尋參考資料】：\n{web_context}\n\n"
+            f"【使用者問題】：\n{user_message}"
+        )
+
+    payload = {
+        "model": local_model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content},
+        ],
+        "stream": False,
+        "options": {
+            "temperature": 0.7,
+            "num_predict": 280,
+        },
+    }
+
+    resp = requests.post(
+        f"{ollama_api_url}/api/chat", json=payload, timeout=35
+    )
+    if resp.status_code == 200:
+        raw_text = resp.json().get("message", {}).get("content", "")
+        return format_reply_text(raw_text)
+    else:
+        raise RuntimeError(f"Ollama 回應狀態碼異常: {resp.status_code}")
+
+
 def ask_gemini(user_message: str) -> str:
-    """呼叫 Google Gemini API 取得智慧回答"""
+    """第二備援：呼叫 Google Gemini 雲端模型佇列"""
     global gemini_client
     current_key = os.getenv("GEMINI_API_KEY")
     if not gemini_client and current_key:
@@ -84,18 +176,16 @@ def ask_gemini(user_message: str) -> str:
     if not gemini_client or not current_key:
         return (
             "【AI 智慧助理提示】\n"
-            "尚未設定 GEMINI_API_KEY！\n"
-            "請在專案的 .env 檔案中填入免費的 Gemini API Key，我就可以為您回答任何問題囉！"
+            "尚未設定 GEMINI_API_KEY，且本地模型暫時未連通！"
         )
 
     system_prompt = (
         "你是一個聰明、熱心且幽默有禮的 LINE 個人智慧助理，名字叫做「智聊小精靈」。"
         "請一律使用繁體中文（台灣繁體習慣）回覆。"
-        "【排版與長度重要規則】\n"
-        "1. 回覆總長度嚴格控制在 250 至 450 字之間（最長絕對不可超過 500 字）。\n"
-        "2. 務必在限制長度內把語意完整表達完畢，有頭有尾，切勿話說到一半斷掉！請以完整的句子句號結束。\n"
-        "3. 請減少或不要使用 Markdown 的雙星號粗體標籤（例如 **文字**），LINE 訊息不需要過多的星號，請改用自然換行或清晰標點呈現。\n"
-        "4. 適當使用親切的 emoji 與簡短的條列整理，適合手機 LINE 上快速瀏覽閱讀。"
+        "【排版與長度規則】\n"
+        "1. 回覆總長度控制在 250 至 450 字之間（最長不可超過 500 字）。\n"
+        "2. 務必在限制長度內把語意完整表達完畢，以完整的句子句號結束。\n"
+        "3. 請勿使用 Markdown 雙星號粗體標籤（**文字**），改用自然換行與 Emoji 呈現。"
     )
 
     models_to_try = [
@@ -107,7 +197,6 @@ def ask_gemini(user_message: str) -> str:
 
     for model_name in models_to_try:
         try:
-            # 提高 max_output_tokens 確保中文字元充足，絕不因 token 不足而在半句中斷
             response = gemini_client.models.generate_content(
                 model=model_name,
                 contents=user_message,
@@ -117,44 +206,82 @@ def ask_gemini(user_message: str) -> str:
                 ),
             )
             if response and response.text:
-                text = response.text.strip()
-                # 去除 LINE 聊天室中多餘的 ** 星號
-                text = text.replace("**", "")
-                # 確保長度不超過 500 字，若超出則在最近的句點安全截斷
-                if len(text) > 500:
-                    truncated = text[:495]
-                    last_punct = max(
-                        truncated.rfind("。"),
-                        truncated.rfind("！"),
-                        truncated.rfind("？"),
-                        truncated.rfind("\n"),
-                    )
-                    if last_punct > 250:
-                        text = truncated[: last_punct + 1]
-                    else:
-                        text = truncated + "..."
-                return text
+                return format_reply_text(response.text)
         except Exception as e:
-            app.logger.warning(f"嘗試模型 {model_name} 失敗: {e}，切換備用模型...")
+            app.logger.warning(f"嘗試雲端模型 {model_name} 失敗: {e}，切換備用...")
             continue
 
     return "抱歉，AI 大腦目前暫時連線繁忙，請稍候再試一次！"
 
 
+def ask_ai_brain(user_message: str) -> str:
+    """
+    雙大腦智慧調度架構：
+    1. 針對需要實效性之問題，自動觸發即時網路搜尋 (Web Search Grounding)
+    2. 優先調度本地 GPU 運行的 Qwen 2.5 3B (無限額度、具備 2026 時效資訊)
+    3. 若本地服務離線或發生錯誤，自動無縫切換至 Google Gemini 雲端備援佇列
+    """
+    # 判斷是否需要即時聯網檢索
+    web_context = ""
+    search_keywords = [
+        "天氣", "新聞", "今天", "明天", "昨天", "最新", "現在",
+        "2026", "2025", "股價", "匯率", "推薦", "什麼", "誰是", "哪裡", "多少"
+    ]
+    if any(k in user_message for k in search_keywords) or len(user_message) >= 4:
+        try:
+            web_context = search_web_context(user_message, max_results=2)
+        except Exception as err:
+            app.logger.warning(f"聯網檢索跳過: {err}")
+
+    # 1. 嘗試呼叫本地 Qwen 2.5 模型
+    try:
+        reply = ask_local_qwen(user_message, web_context)
+        if reply:
+            return reply
+    except Exception as local_err:
+        app.logger.warning(
+            f"本地 Qwen 2.5 調度未成功 ({local_err})，無縫切換至 Google Gemini 雲端備援..."
+        )
+
+    # 2. 本地不可用時，無縫回退至 Google Gemini 雲端
+    return ask_gemini(user_message)
+
+
 @app.route("/", methods=["GET"])
 def index():
-    return "智聊小精靈 (LINE Gemini AI Smart Bot) v1.0 改善版運作中！Webhook 端點為 /callback"
+    return "智聊小精靈 (LINE Smart Bot - Local Qwen 2.5 + Web Search + Gemini Backup) 運作中！"
 
 
 @app.route("/health", methods=["GET"])
 def health():
+    # 檢測本地 Ollama 連線狀態
+    local_online = False
+    try:
+        res = requests.get(f"{ollama_api_url}/api/tags", timeout=1.5)
+        local_online = res.status_code == 200
+    except Exception:
+        local_online = False
+
     return jsonify(
         {
             "status": "ok",
-            "version": "1.0.1-improved",
-            "has_line_secret": bool(channel_secret),
-            "has_line_token": bool(channel_access_token),
-            "has_gemini_key": bool(os.getenv("GEMINI_API_KEY")),
+            "version": "1.2.0-local-qwen-websearch",
+            "local_ai": {
+                "engine": "Ollama",
+                "model": local_model_name,
+                "online": local_online,
+            },
+            "web_search": {
+                "engine": "ddgs",
+                "enabled": True,
+            },
+            "cloud_backup": {
+                "has_gemini_key": bool(os.getenv("GEMINI_API_KEY")),
+            },
+            "line_credentials": {
+                "has_secret": bool(channel_secret),
+                "has_token": bool(channel_access_token),
+            },
         }
     )
 
@@ -184,7 +311,7 @@ def callback():
 # 註冊訊息處理器
 if handler:
 
-    # 1. 文字訊息處理器 (AI 智慧對話 + 輸入防呆引導 + 內建指令)
+    # 1. 文字訊息處理器 (本地 AI + 聯網檢索 + 輸入防呆引導 + 離線指令)
     @handler.add(MessageEvent, message=TextMessageContent)
     def handle_message(event):
         raw_text = event.message.text
@@ -195,8 +322,8 @@ if handler:
             reply = (
                 "【智聊小精靈提示】\n"
                 "您輸入的訊息好像是空白的喔！請輸入您想詢問的內容，例如：\n"
-                "• 「推薦台北一日遊景點」\n"
-                "• 「請幫我寫一封請假信草稿」\n"
+                "• 「台北今天天氣如何？」\n"
+                "• 「請推薦 3 個台北安靜咖啡廳」\n"
                 "💡 輸入「說明」可查看完整使用指南！"
             )
             send_line_reply(event.reply_token, reply)
@@ -217,17 +344,16 @@ if handler:
         # 情境 C：內建功能指令 (說明 / help)
         if user_text.lower() in ["說明", "功能", "指令", "help", "/help", "指南"]:
             guide = (
-                "🤖【智聊小精靈 功能指南】\n\n"
-                "我是您的專屬生活智慧助理，具備繁體中文生活問答與寫作能力！\n\n"
-                "✨【推薦使用方式】\n"
-                "1. 旅遊行程：輸入「推薦花蓮兩天一夜行程」\n"
-                "2. 文案撰寫：輸入「幫我寫給主管的專案進度回報信」\n"
-                "3. 知識解答：輸入「請用簡單比喻解釋量子電腦」\n"
-                "4. 語言翻譯：輸入「請將這段話翻成流利日文」\n\n"
-                "💡【貼心提示】\n"
-                "• 輸入文字請盡量具體，回答會更精準喔！\n"
-                "• 傳送貼圖會自動已讀不回，節省額度～\n"
-                "• 目前僅支援文字，暫不支援語音/影片/檔案分析。"
+                "🤖【智聊小精靈 v1.2 升級版指南】\n\n"
+                "我已升級為「本地 GPU 模型 (Qwen 2.5) + 即時聯網搜尋」生活智慧助理！\n\n"
+                "✨【升級特色】\n"
+                "1. 即時聯網：可詢問 2026 最新天氣、即時新聞與生活動態！\n"
+                "2. 本地運算：由本機 RTX 3050 顯卡驅動，零 API 限制！\n"
+                "3. 雲端雙備援：若本機離線，自動無縫切換 Google Gemini！\n\n"
+                "💡【推薦試試】\n"
+                "• 「台北今天天氣如何？」\n"
+                "• 「2026年最新熱門科技話題」\n"
+                "• 「推薦適合閱讀的安靜咖啡廳」"
             )
             send_line_reply(event.reply_token, guide)
             return
@@ -262,22 +388,22 @@ if handler:
         if user_text.lower() in ["你好", "您好", "嗨", "hi", "hello", "在嗎", "安安"]:
             greeting = (
                 "嗨！我是「智聊小精靈」✨\n"
-                "今天有什麼我可以協助您的嗎？您可以隨時向我詢問生活問題、旅遊規劃或文案靈感！\n\n"
-                "💡 輸入「說明」可查看完整功能清單喔！"
+                "我現在具備本地 Qwen 2.5 雙大腦與即時網路搜尋能力！\n"
+                "今天有什麼想查詢或聊聊的嗎？輸入「說明」可看完整功能清單喔！"
             )
             send_line_reply(event.reply_token, greeting)
             return
 
-        # 情境 E：正常問題輸入，呼叫 Gemini AI 取得回答
+        # 情境 E：正常問題輸入，呼叫雙大腦 (本地 Qwen 2.5 優先 + 聯網搜尋 ➜ 雲端 Gemini 備援)
         try:
             print(f"收到來自使用者 [{event.source.user_id}] 的問題: {user_text}")
         except Exception:
             pass
 
-        ai_reply = ask_gemini(user_text)
+        ai_reply = ask_ai_brain(user_text)
 
         try:
-            print(f"Gemini AI 回覆: {ai_reply[:60]}...")
+            print(f"AI 回覆: {ai_reply[:60]}...")
         except Exception:
             pass
 
@@ -299,7 +425,7 @@ if handler:
     def handle_image_message(event):
         hint = (
             "【智聊小精靈使用提示】📷\n"
-            "收到您的圖片囉！目前改善版主要專注於文字智慧問答與生活諮詢，尚未支援圖片視覺辨識分析功能。\n\n"
+            "收到您的圖片囉！目前升級版主要專注於文字智慧問答與即時生活搜尋，尚未支援圖片視覺辨識分析功能。\n\n"
             "請直接以文字輸入您的問題與我互動～💡\n"
             "（輸入「說明」可查看支援的功能清單）"
         )
