@@ -1,171 +1,161 @@
-# 🤖 智聊小精靈 (Gemini Smart Bot) — LINE Bot 改善版
+# 🤖 智慧 LINE AI 對話助理 (Smart LINE Bot)
 
-一個基於 **Flask** + **LINE Messaging API v3** + **Google Gemini AI** 的繁體中文生活對話智慧助理。  
-本專案為「課後作業 LINE Bot 改善版」，以第一版為起點完成**輸入防呆引導、不支援訊息格式智能提示與內建離線功能指南**等關鍵改善。
+這是一個基於 **Flask** + **LINE Messaging API v3** + **本地 GPU 模型 (Qwen 2.5 3B)** + **即時聯網搜尋 (Search Grounding)**，並具備 **Google Gemini 雲端四重備援** 的繁體中文智慧助理機器人。
 
----
-
-## 📌 專題基本資訊與繳交連結
-
-- **專題名稱：** 智聊小精靈 (Gemini Smart Bot)
-- **GitHub 專案庫：** [https://github.com/41154B003Sam/line-bot](https://github.com/41154B003Sam/line-bot)
-- **開發紀錄網頁 (GitHub Pages)：** [https://41154b003sam.github.io/line-bot/](https://41154b003sam.github.io/line-bot/)
-- **成果簡報檔案：** [`LINEBot-智聊小精靈-成果簡報.pdf`](LINEBot-智聊小精靈-成果簡報.pdf)（5 頁專題簡報）
-- **實測證明段落：** [開發紀錄網頁第六章「測試結果與實測證明」](https://41154b003sam.github.io/line-bot/#test-proof)
+本專案解決了傳統大型語言模型「知識庫停留在 2024~2025 年」的限制，透過即時網路檢索技術，讓機器人能即時查詢 2026 年最新動態、天氣與新聞，並由本地 GPU 進行高速推理，達成零 API 費用、無額度限制的智慧對話。
 
 ---
 
-## 👥 用途與使用對象
+## 🔒 資安與金鑰管理聲明 (Security Statement)
 
-- **用途：** 提供隨身常駐於 LINE 聊天室的 24/7 生活智慧對話助理。使用者無需下載額外 App 或前往專門網頁登入，在日常通訊軟體中即可發問生活知識、旅遊推薦、草稿撰寫與靈感解答。
-- **使用對象：** 所有 LINE 日常高頻度使用者（上班族、學生、家庭日常），特別適合需要在手機上以簡潔中文快速獲得答案、不耐繁複操作的人群。
-
----
-
-## ✨ 核心功能與改善版新特性
-
-| 功能分類 | 功能項目 | 說明 |
-|----------|----------|------|
-| **🚀 v1.2.0 重磅** | 🧠 本地 Qwen 2.5 3B (Ollama) | 本機 RTX 3050 GPU 驅動，零 API 費用、無額度限制，首選本地大腦 |
-| **🚀 v1.2.0 重磅** | 🌐 即時聯網搜尋 (ddgs) | 免費爬取 2026 最新即時天氣、新聞與知識，突破模型 2025 知識截止時間 |
-| **高可用性** | 🔄 雙大腦無縫備援 | 本地離線時自動切換至 Google Gemini 四重雲端模型佇列，確保 24/7 不斷線 |
-| **手機 UX 優化** | 📏 輸出長度與安全截斷 | 控制在 200~450 字（上限 500 字），並於標點符號（`。`、`！`、`？`）安全收尾，不留半句 |
-| **版面清洗** | 🎨 移除 Markdown 星號 | 自動清洗 LINE 不支援的 `**` 粗體星號，改採親切 Emoji 與換行條列呈現 |
-| **輸入防呆** | 🛡️ 空白與不完整輸入引導 | 攔截純空白訊息提醒補充；對「推薦」、「幫我」等短詞提供分類選單引導 |
-| **格式保護** | 💡 全格式不支援訊息提示 | 收到語音、位置、影片、檔案、圖片時主動回傳親切提示並引導文字輸入 |
-| **隨身手冊** | 📖 內建離線功能指南 | 輸入「說明」、「功能」或「/help」直接回傳使用教學與 3 大推薦句型 |
-| **社交習慣優化** | 😶 貼圖/純表情已讀不回 | 收到貼圖或純 Emoji 僅記錄後台 Log，不回覆訊息，節省運算資源 |
+本專案嚴格遵循資安規範：
+- 程式庫內**絕不包含**任何 LINE 長效存取權杖 (Channel Access Token)、頻道密鑰 (Channel Secret)、試算表 ID (Spreadsheet ID)、Google Apps Script `/exec` 網址或任何真實金鑰。
+- 所有敏感設定均透過本地環境變數（`.env`）於啟動時讀取，並已透過 `.gitignore` 嚴格隔離，防止機密上傳至公開儲存庫。
+- 本專案提供 `.env.example` 範本檔案，僅使用佔位文字說明，使用者啟動時自備設定即可。
 
 ---
 
-## 🔄 改善版四大紀錄（前後差異對比）
+## 🛠️ 如何安裝 (How to Install)
 
-1. **原本問題：**
-   - 輸入空白或模糊單詞（如「推薦」）直接調用 Gemini，耗損 Token 且回答偏離預期。
-   - 傳送語音、位置、影片、檔案等非文字訊息時機器人毫無反應，使用者誤以為故障。
-   - 缺乏離線功能教學指令，初次使用者不知能問什麼。
-2. **修改內容：**
-   - 增加空白字串檢驗與不完整輸入分類選單（`incomplete_dict`）。
-   - 註冊 `AudioMessageContent`、`LocationMessageContent`、`VideoMessageContent`、`FileMessageContent`、`ImageMessageContent` 專屬事件處理器。
-   - 實作「說明 / 功能 / /help」離線指南指令。
-3. **前後差異：**
-   - *改善前 (v1.0.0)*：遇到非文字格式無反饋；模糊輸入易浪費 AI 配額；無內建幫助。
-   - *改善後 (v1.0.1)*：訊息格式 100% 覆蓋反饋；模糊輸入主動導流；提供隨身功能選單。
-4. **重新測試結果：**
-   - 空白輸入與「推薦」均能觸發補充指引；語音與位置皆獲得友善提示；正常問答流暢穩定，三大測試全數通過！
-
----
-
-## 📁 專案結構與文件交付 (Deliverables)
-
-```
-line-bot/
-├── app.py                             # 後端核心主程式（Flask + LINE SDK v3 + Gemini AI 改善版）
-├── requirements.txt                   # Python 套件依賴清單
-├── .env.example                       # 環境變數範例設定檔（不含真實金鑰）
-├── .gitignore                         # 機密隔離規則（嚴格排除 .env 等機密）
-├── index.html                         # 🌐 開發紀錄網頁原始檔（GitHub Pages 託管）
-├── LINEBot-智聊小精靈-成果簡報.pdf   # 📊 專案成果簡報（5 頁完整 PDF）
-├── LINEBot-智聊小精靈-成果簡報.html  # 成果簡報投影片原始檔（16:9）
-├── LINE_Bot_v1_Project_Plan.pdf      # 📄 原版專案計畫書正式文件 (A4 PDF)
-├── LINE_Bot_v1_Project_Plan.html     # 原版專案計畫書網頁原始檔 (A4)
-├── LINE_Bot_v1_Presentation.pdf      # 原版審查簡報 (16:9 PDF)
-├── LINE_Bot_v1_Presentation.html     # 原版審查簡報網頁原始檔 (16:9)
-└── LINE_Bot_v1_Executive_Summary.md   # 執行摘要說明文件
-```
-
----
-
-## 🚀 快速開始與設定方式
-
-### 1. 複製專案
+### 1. 複製本專案庫
 
 ```bash
-git clone https://github.com/41154B003Sam/line-bot.git
-cd line-bot
+git clone https://github.com/41154B003Sam/smart-line-bot.git
+cd smart-line-bot
 ```
 
-### 2. 安裝依賴套件
+### 2. 安裝 Python 依賴環境
+
+確保電腦已安裝 Python 3.10 以上版本，執行以下指令安裝所需套件：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 設定環境變數（機密隔離）
+*（套件包含：`flask`、`line-bot-sdk`、`python-dotenv`、`google-genai`、`ddgs`、`requests`）*
 
-複製範本檔案建立 `.env`：
+### 3. （可選但推薦）安裝本地 AI 引擎 Ollama
+
+若希望使用本機 GPU 運行 Qwen 2.5 3B 模型（免 API 費用、無上限）：
+1. 至 Ollama 官網下載安裝：[https://ollama.com/download](https://ollama.com/download)
+2. 開啟終端機下載模型：
+   ```bash
+   ollama pull qwen2.5:3b
+   ```
+3. 確保 Ollama 服務於背景運行（預設監聽 `http://localhost:11434`）。
+*(若未安裝 Ollama，系統會自動無縫切換至 Google Gemini 雲端模型)*
+
+### 4. 設定環境變數
+
+複製範本檔案 `.env.example` 並更名為 `.env`：
 
 ```bash
 cp .env.example .env
 ```
 
-編輯 `.env`，填入您的金鑰（**注意：請勿將真實金鑰上傳至 GitHub！**）：
+編輯 `.env`，填入您的 LINE 與 Gemini 設定（使用佔位說明，請填入您自己的金鑰）：
 
 ```env
 # LINE Developers Messaging API Credentials
 LINE_CHANNEL_SECRET=your_channel_secret_here
 LINE_CHANNEL_ACCESS_TOKEN=your_channel_access_token_here
 
-# Google Gemini API Key (可自 Google AI Studio 免費取得)
+# Google Gemini API Key (可於 Google AI Studio 免費申請作為備援)
 GEMINI_API_KEY=your_gemini_api_key_here
 
-# 本地伺服器通訊埠
+# 本地 Ollama 伺服器設定 (預設即可)
+OLLAMA_API_URL=http://localhost:11434
+LOCAL_MODEL_NAME=qwen2.5:3b
+
+# 伺服器通訊埠
 PORT=5000
 ```
 
-> 💡 **取得金鑰指引：**
-> - LINE：前往 [LINE Developers Console](https://developers.line.biz/) 建立 Messaging API Channel。
-> - Gemini：前往 [Google AI Studio](https://aistudio.google.com/app/apikey) 免費取得 API Key。
+---
 
-### 4. 啟動伺服器
+## ▶️ 如何執行 (How to Run)
+
+### 步驟 1：啟動後端伺服器
+
+在專案目錄下執行：
 
 ```bash
 python app.py
 ```
 
-伺服器將在 `http://localhost:5000` 啟動，可透過 `GET /health` 驗證金鑰載入狀態。
+伺服器將在 `http://localhost:5000` 啟動。您可以開啟瀏覽器存取 `http://localhost:5000/health` 查看健康檢查狀態。
 
-### 5. 啟動公開 HTTPS 穿透（Cloudflare Tunnel 免費方案）
+### 步驟 2：開啟公開 HTTPS 穿透（Cloudflare Tunnel）
+
+LINE Webhook 需要合法的公開 HTTPS 網址。使用免費的 Cloudflare Tunnel：
 
 ```bash
-# Windows 透過 winget 安裝
-winget install cloudflare.cloudflared
-
-# 啟動臨時通道
+# Windows (若未安裝可用 winget install cloudflare.cloudflared)
 cloudflared tunnel --url http://localhost:5000
 ```
 
-複製終端機產生的 `https://xxxx.trycloudflare.com` 網址。
+終端機將產生一組臨時網址（例如：`https://xxxx.trycloudflare.com`）。
 
-### 6. 設定 LINE Webhook
+### 步驟 3：設定 LINE Developers 後台
 
-前往 LINE Developers Console → 您的 Channel → **Messaging API**：
-1. **Webhook URL** 填入：`https://你的穿透網址/callback`
-2. 開啟 **Use webhook**
-3. 關閉 **Auto-reply messages**
-4. 點擊 **Verify**，確認回傳 `Success`。
+1. 登入 [LINE Developers Console](https://developers.line.biz/console/)。
+2. 進入您的 Messaging API Channel ➜ 切換至 **Messaging API** 分頁。
+3. 將 **Webhook URL** 設定為：`https://你的穿透網址/callback`
+4. 開啟 **Use webhook** 開關。
+5. 點擊 **Verify** 按鈕確認回傳 `Success` 即可開始在 LINE 聊天室中互動！
 
----
-
-## 🧪 使用方法與三大測試情境
-
-| 情境 | 測試操作輸入 | 預期結果 | 實際測試結果 |
-|------|-------------|----------|--------------|
-| **1. 正常使用** | 發送「請推薦台北 3 個適合閱讀的安靜咖啡廳」 | 產出 250~450 字繁中推薦，排版條列清晰，無 `**` 星號，句尾完整收尾。 | 回傳「嗨！我是你的智聊小精靈...為你精選 3 間台北極度適合沉浸閱讀的口袋名單...」完整收尾於句點。 |
-| **2. 輸入不完整** | 發送空白訊息「   」或單詞「推薦」 | 即時提醒輸入為空白或補充詳細需求，提供分類選單引導。 | 空白輸入回覆提醒填寫內容；「推薦」回覆提供美食/旅遊/娛樂 3 大分類引導補充。 |
-| **3. 不支援的輸入** | 發送位置資訊 (Location) 或語音訊息 (Audio) | 提供明確親切提示，告知不支援該格式並引導改用文字輸入。 | 位置訊息即時回覆暫不支援定位，請直接打字；語音訊息回覆請改文字輸入。 |
+> ⚠️ **重要提醒（還原 Webhook）：**  
+> 測試完畢後，請按下 `Ctrl + C` 關閉伺服器。若您原本有正在運行的待辦事項機器人（例如 Windows 5 Apps Script 或 `/exec` 網址），**請務必在 LINE Developers 後台將 Webhook URL 切換回您原本的 Apps Script 網址**，否則您原本的待辦事項機器人將無法接收訊息。
 
 ---
 
-## ⚠️ 已知限制與下一步藍圖
+## 🔄 修改了什麼 (What You Modified)
 
-1. **無多輪對話記憶 (Stateless)：** 目前問答為單輪獨立運作，機器人無法記憶上一個問題；下階段預計導入 Redis 或 SQLite 儲存最近 3~5 輪 Session 上下文。
-2. **本地主機依賴：** 目前依賴本機開機與臨時 Cloudflare 隧道；下階段將容器化（Docker）部署至 Google Cloud Run 達成 24 小時不間斷服務。
-3. **尚未支援圖文選單 (Rich Menu)：** 下階段將在 LINE 後台建立六宮格視覺化快捷選單。
-4. **尚未支援多模態圖片分析：** 目前收到圖片會提示暫不支援，未來將串接 Gemini 視覺辨識模型分析影像內容。
+本專案歷經多次實務迭代與健全度升級，核心修改內容如下：
+
+### 1. 雙大腦架構：本地 GPU 模型 + 即時聯網搜尋 (v1.2.0)
+- **原本問題**：傳統大型語言模型的記憶停留在 2024~2025 年，無法回答當前時間（2026年）的新聞、即時氣象或最新動態；且純依賴雲端 API 容易耗盡每週免費額度。
+- **具體修改**：
+  - 導入本地 **Qwen 2.5 3B**（由本機 RTX 3050 顯卡運行），零 API 成本、無調用次數限制。
+  - 整合 `ddgs` 免費搜尋引擎：當使用者提問即時資訊（天氣、新聞、最新話題、推薦等），系統自動上網爬取前 2~3 則即時網路摘要，注入 Prompt 供模型參考。
+  - 設計**雙大腦無縫備援機制**：若本地 Ollama 未啟動，自動回退至 Google Gemini 四重雲端模型佇列，確保 24/7 不斷線。
+
+### 2. 輸入防呆與不完整引導機制 (v1.0.1)
+- **原本問題**：使用者傳送空白訊息、空格或僅輸入「推薦」、「幫我」等模糊短詞，直接送進 AI 會浪費運算配額且回答偏離預期。
+- **具體修改**：
+  - 實作空白輸入過濾，主動提醒使用者補充問題。
+  - 針對模糊關鍵字提供美食、旅遊、娛樂等 3 大分類選單引導，精準收斂使用者意圖。
+
+### 3. 全格式不支援訊息友善提示
+- **原本問題**：初版僅註冊文字與貼圖處理器；若傳送語音、位置、影片、檔案等，機器人毫無反應，使用者無法判定是否故障。
+- **具體修改**：
+  - 完整註冊 `AudioMessageContent`、`LocationMessageContent`、`VideoMessageContent`、`FileMessageContent`、`ImageMessageContent`。
+  - 當收到非文字內容時，主動發送友善提示告知目前功能限制，並引導打字輸入。
+
+### 4. 社交習慣與排版最佳化
+- **貼圖／純 Emoji 已讀不回**：收到貼圖或純表情符號時僅記錄後台 Log，不回覆訊息，避免機器人洗版並節省運算資源。
+- **500 字長度控制與標點符號安全截斷**：嚴格限制輸出長度於 200~450 字之間，並在最接近末尾的標點（`。`、`！`、`？`）自然收尾，絕不留下半句殘言。
+- **Markdown 粗體星號清洗**：自動過濾 LINE 聊天室不支援的 `**` 星號，改採自然換行與 Emoji 排版。
+
+### 5. 跨平台編碼穩定性修復
+- **原本問題**：在 Windows 繁體中文環境下，終端機標準輸出預設為 `cp950 / Big5` 編碼。當 AI 回覆包含特殊 Emoji 時會觸發 `UnicodeEncodeError` 導致伺服器崩潰。
+- **具體修改**：在伺服器入口加入 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`，確保終端機列印任何特殊符號皆不中斷伺服器。
 
 ---
 
-## 📝 License
+## 📁 檔案結構說明
 
-本專案採 MIT License 開源發布，供學習與專題研究使用。
+```
+smart-line-bot/
+├── app.py              # 核心主程式（雙大腦調度、即時聯網、LINE Webhook）
+├── requirements.txt    # Python 套件依賴清單
+├── .env.example        # 環境變數範例（安全隔離，不含真實金鑰）
+├── .gitignore          # Git 忽略設定（排除 .env 等機密資訊）
+└── README.md           # 完整安裝、執行與修改歷程說明手冊
+```
+
+---
+
+## 📝 授權說明
+
+本專案採 MIT License 開源發布，僅供學習、教學與專題研究使用。
