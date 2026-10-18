@@ -2,7 +2,9 @@ import io
 import os
 import sys
 import json
+import threading
 import requests
+from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, request, abort, jsonify
 
@@ -64,6 +66,7 @@ gemini_client = genai.Client(api_key=gemini_api_key) if gemini_api_key else None
 def send_line_reply(reply_token: str, message_text: str):
     """封裝 LINE 訊息回覆邏輯"""
     if not configuration:
+        app.logger.error("伺服器缺少 LINE configuration 設定，無法回覆")
         return
     try:
         with ApiClient(configuration) as api_client:
@@ -74,8 +77,10 @@ def send_line_reply(reply_token: str, message_text: str):
                     messages=[TextMessage(text=message_text)],
                 )
             )
+            print(f"✅ 成功發送 LINE 回覆訊息給使用者！長度: {len(message_text)} 字", flush=True)
     except Exception as err:
-        app.logger.error(f"傳送 LINE 回覆訊息失敗: {err}")
+        app.logger.error(f"❌ 傳送 LINE 回覆訊息失敗: {err}")
+        print(f"❌ 傳送 LINE 回覆訊息失敗: {err}", flush=True)
 
 
 def format_reply_text(text: str) -> str:
@@ -98,13 +103,33 @@ def format_reply_text(text: str) -> str:
     return text
 
 
-def search_web_context(query: str, max_results: int = 2) -> str:
+def get_current_time_context() -> tuple[str, datetime]:
+    """取得當前本機真實時間與台灣繁體中文排版資訊"""
+    now = datetime.now()
+    now_str = now.strftime("%Y年%m月%d日 %H:%M")
+    weekday_map = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    weekday_str = weekday_map[now.weekday()]
+    desc = f"當前真實本機系統時間為：{now_str}（{weekday_str}），今年是西元 {now.year} 年（民國 {now.year - 1911} 年）。"
+    return desc, now
+
+
+def search_web_context(query: str, max_results: int = 3) -> str:
     """即時網際網路搜尋：爬取最新網路資訊與新聞摘要 (Search Grounding)"""
     try:
         from ddgs import DDGS
+        now = datetime.now()
+        current_year = str(now.year)
+
+        # 搜尋優化：若查詢詢問時事、最新動態且未指明年份，自動加入當前年份以確保搜尋時效性
+        search_query = query.encode("utf-8", "ignore").decode("utf-8")
+        time_related_terms = ["最新", "新聞", "今天", "現在", "時事", "流行", "熱門", "科技", "趨勢", "活動", "天氣"]
+        if any(term in search_query for term in time_related_terms) and current_year not in search_query:
+            search_query = f"{current_year} {search_query}"
 
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
+            results = list(ddgs.text(search_query, max_results=max_results))
+            if not results and search_query != query:
+                results = list(ddgs.text(query, max_results=max_results))
             if not results:
                 return ""
             snippets = []
@@ -123,14 +148,19 @@ def ask_local_qwen(user_message: str, web_context: str = "") -> str:
     """
     第一優先：呼叫本機運行的 Ollama Qwen 2.5 3B 模型
     - 運行於本機 RTX 3050 GPU (4GB VRAM)，完全免費無額度上限
-    - 結合即時聯網搜尋資料，突破知識截止年份限制
+    - 結合即時聯網搜尋資料與真實系統時間錨定，徹底杜絕時間穿越與知識過時問題
     """
+    time_info, now = get_current_time_context()
     system_prompt = (
-        "你是一個聰明、熱心且幽默有禮的 LINE 個人智慧助理，名字叫做「智聊小精靈」。"
-        "你目前運行於使用者的本地 GPU (RTX 3050) 上，並具備即時網際網路檢索能力。"
+        "你是一個聰明、熱心且幽默有禮的 LINE 個人智慧助理，名字叫做「智聊小精靈」。\n"
+        "你目前運行於使用者的本地 GPU (RTX 3050) 上，並具備即時網際網路檢索能力。\n"
+        f"【核心真實時間錨定】：\n"
+        f"• {time_info}\n"
+        f"• 請絕對牢記當前真實年份是西元 {now.year} 年！\n"
+        f"• 當使用者詢問任何與日期、年份、現在時間或最新時事相關之問題，請務必基於上述真實時間與檢索資料回答，嚴禁回答已過時的歷史年份（例如 2023、2024 或 2025 年）。\n"
         "請一律使用繁體中文（台灣習慣語境）回覆。\n"
         "【排版與長度規則】\n"
-        "1. 回覆總長度控制在 200 至 450 字之間（最長絕對不可超過 500 字）。\n"
+        "1. 回覆總長度控制在 180 至 450 字之間（最長絕對不可超過 500 字）。\n"
         "2. 務必在限制長度內將語意完整表達完畢，以句號結束，切勿中途斷頭。\n"
         "3. 請勿使用 Markdown 的雙星號粗體標籤（例如 **文字**），請改用自然換行或 Emoji 呈現。\n"
         "4. 若有提供即時網路搜尋資料，請依據最新資訊回答，確保時效性。"
@@ -152,7 +182,7 @@ def ask_local_qwen(user_message: str, web_context: str = "") -> str:
         "stream": False,
         "options": {
             "temperature": 0.7,
-            "num_predict": 280,
+            "num_predict": 300,
         },
     }
 
@@ -166,7 +196,7 @@ def ask_local_qwen(user_message: str, web_context: str = "") -> str:
         raise RuntimeError(f"Ollama 回應狀態碼異常: {resp.status_code}")
 
 
-def ask_gemini(user_message: str) -> str:
+def ask_gemini(user_message: str, web_context: str = "") -> str:
     """第二備援：呼叫 Google Gemini 雲端模型佇列"""
     global gemini_client
     current_key = os.getenv("GEMINI_API_KEY")
@@ -179,14 +209,25 @@ def ask_gemini(user_message: str) -> str:
             "尚未設定 GEMINI_API_KEY，且本地模型暫時未連通！"
         )
 
+    time_info, now = get_current_time_context()
     system_prompt = (
-        "你是一個聰明、熱心且幽默有禮的 LINE 個人智慧助理，名字叫做「智聊小精靈」。"
-        "請一律使用繁體中文（台灣繁體習慣）回覆。"
+        "你是一個聰明、熱心且幽默有禮的 LINE 個人智慧助理，名字叫做「智聊小精靈」。\n"
+        f"【核心真實時間錨定】：\n"
+        f"• {time_info}\n"
+        f"• 當前是西元 {now.year} 年！請務必以此真實時間基準為準，絕對不可回答已過時的歷史年份（例如 2023、2024 或 2025 年）。\n"
+        "請一律使用繁體中文（台灣繁體習慣）回覆。\n"
         "【排版與長度規則】\n"
-        "1. 回覆總長度控制在 250 至 450 字之間（最長不可超過 500 字）。\n"
+        "1. 回覆總長度控制在 200 至 450 字之間（最長不可超過 500 字）。\n"
         "2. 務必在限制長度內把語意完整表達完畢，以完整的句子句號結束。\n"
         "3. 請勿使用 Markdown 雙星號粗體標籤（**文字**），改用自然換行與 Emoji 呈現。"
     )
+
+    contents_payload = user_message
+    if web_context:
+        contents_payload = (
+            f"【即時網路搜尋參考資料】：\n{web_context}\n\n"
+            f"【使用者問題】：\n{user_message}"
+        )
 
     models_to_try = [
         "gemini-flash-latest",
@@ -199,7 +240,7 @@ def ask_gemini(user_message: str) -> str:
         try:
             response = gemini_client.models.generate_content(
                 model=model_name,
-                contents=user_message,
+                contents=contents_payload,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     max_output_tokens=2048,
@@ -221,17 +262,22 @@ def ask_ai_brain(user_message: str) -> str:
     2. 優先調度本地 GPU 運行的 Qwen 2.5 3B (無限額度、具備 2026 時效資訊)
     3. 若本地服務離線或發生錯誤，自動無縫切換至 Google Gemini 雲端備援佇列
     """
-    # 判斷是否需要即時聯網檢索
     web_context = ""
-    search_keywords = [
-        "天氣", "新聞", "今天", "明天", "昨天", "最新", "現在",
-        "2026", "2025", "股價", "匯率", "推薦", "什麼", "誰是", "哪裡", "多少"
-    ]
-    if any(k in user_message for k in search_keywords) or len(user_message) >= 4:
-        try:
-            web_context = search_web_context(user_message, max_results=2)
-        except Exception as err:
-            app.logger.warning(f"聯網檢索跳過: {err}")
+    # 若直接詢問純時間日期，不需網路搜尋干擾
+    clean_q = user_message.replace("？", "").replace("?", "").replace(" ", "").strip()
+    direct_date_words = ["今天幾號", "今天幾月幾號", "今天日期", "現在是哪一年", "今年是哪一年", "現在幾點", "現在時間", "今天星期幾"]
+    is_direct_date = any(clean_q == w for w in direct_date_words)
+
+    if not is_direct_date:
+        search_keywords = [
+            "天氣", "新聞", "今天", "明天", "昨天", "最新", "現在",
+            "2026", "2025", "股價", "匯率", "推薦", "什麼", "誰是", "哪裡", "多少", "活動", "時事"
+        ]
+        if any(k in user_message for k in search_keywords) or len(user_message) >= 4:
+            try:
+                web_context = search_web_context(user_message, max_results=2)
+            except Exception as err:
+                app.logger.warning(f"聯網檢索跳過: {err}")
 
     # 1. 嘗試呼叫本地 Qwen 2.5 模型
     try:
@@ -244,7 +290,7 @@ def ask_ai_brain(user_message: str) -> str:
         )
 
     # 2. 本地不可用時，無縫回退至 Google Gemini 雲端
-    return ask_gemini(user_message)
+    return ask_gemini(user_message, web_context)
 
 
 @app.route("/", methods=["GET"])
@@ -286,6 +332,18 @@ def health():
     )
 
 
+def process_webhook_async(body: str, signature: str):
+    """背景非同步執行事件處理，避免阻塞 LINE Webhook 連線"""
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        app.logger.warning("無效的簽章，拒絕請求。")
+        print("⚠️ 收到無效的 LINE 簽章，已拒絕！")
+    except Exception as e:
+        app.logger.error(f"非同步處理事件時發生錯誤: {e}")
+        print(f"❌ 處理事件時發生錯誤: {e}")
+
+
 @app.route("/callback", methods=["POST"])
 def callback():
     if not handler or not configuration:
@@ -294,18 +352,16 @@ def callback():
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
 
-    app.logger.info("Request body: " + body)
+    app.logger.info("Request body received, delegating to worker thread...")
 
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        app.logger.warning("無效的簽章，拒絕請求。")
-        abort(400)
-    except Exception as e:
-        app.logger.error(f"處理事件時發生錯誤: {e}")
-        return "Internal Error", 500
+    # 立刻啟動背景執行緒處理 AI 推論與回覆，並在 50ms 內回傳 200 OK 給 LINE，徹底解決 LINE 官方超時中斷問題
+    threading.Thread(
+        target=process_webhook_async,
+        args=(body, signature),
+        daemon=True
+    ).start()
 
-    return "OK"
+    return "OK", 200
 
 
 # 註冊訊息處理器
@@ -394,16 +450,45 @@ if handler:
             send_line_reply(event.reply_token, greeting)
             return
 
-        # 情境 E：正常問題輸入，呼叫雙大腦 (本地 Qwen 2.5 優先 + 聯網搜尋 ➜ 雲端 Gemini 備援)
+        # 情境 E：精準即時時間與日期查詢（直球回答，0 秒延遲且 100% 精準對齊本機時鐘）
+        clean_text = user_text.replace("？", "").replace("?", "").replace(" ", "").lower()
+        date_time_triggers = [
+            "今天幾號", "今天幾月幾號", "今天日期", "現在是哪一年", "今年是哪一年",
+            "今年是幾年", "現在是幾年", "現在哪一年", "現在幾點", "現在時間",
+            "今天星期幾", "今天禮拜幾", "今天是星期幾", "今天是禮拜幾", "幾月幾號",
+            "今年幾年", "現在年份", "今年年份", "今天是什麼日子", "今天是幾號", "今天是哪一年"
+        ]
+        is_date_query = (
+            clean_text in date_time_triggers
+            or (("哪一年" in clean_text or "幾年" in clean_text) and any(w in clean_text for w in ["現在", "今年", "這一年"]))
+            or (("幾號" in clean_text or "日期" in clean_text) and any(w in clean_text for w in ["今天", "現在", "今日"]))
+            or (("幾點" in clean_text or "現在時間" in clean_text) and any(w in clean_text for w in ["現在", "目前", "今天"]))
+            or (("星期幾" in clean_text or "禮拜幾" in clean_text) and any(w in clean_text for w in ["今天", "今日"]))
+        )
+        if is_date_query:
+            now = datetime.now()
+            weekday_map = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+            weekday_str = weekday_map[now.weekday()]
+            time_reply = (
+                f"報告主人！⏰ 現在本機的真實時間是：\n\n"
+                f"📅 日期：西元 {now.year} 年 {now.month} 月 {now.day} 日（{weekday_str}）\n"
+                f"🕒 時間：{now.strftime('%H:%M:%S')}\n"
+                f"✨ 年份：今年是西元 {now.year} 年（民國 {now.year - 1911} 年）\n\n"
+                f"小精靈直接調度本機即時時鐘，精準無誤，絕不時間錯亂喔！💡"
+            )
+            send_line_reply(event.reply_token, time_reply)
+            return
+
+        # 情境 F：正常問題輸入，呼叫雙大腦 (本地 Qwen 2.5 優先 + 聯網搜尋 ➜ 雲端 Gemini 備援)
         try:
-            print(f"收到來自使用者 [{event.source.user_id}] 的問題: {user_text}")
+            print(f"收到來自使用者 [{event.source.user_id}] 的問題: {user_text}", flush=True)
         except Exception:
             pass
 
         ai_reply = ask_ai_brain(user_text)
 
         try:
-            print(f"AI 回覆: {ai_reply[:60]}...")
+            print(f"AI 回覆: {ai_reply[:60]}...", flush=True)
         except Exception:
             pass
 
@@ -470,4 +555,25 @@ if handler:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ["--cli", "-c", "cli"]:
+        print("=" * 55)
+        print("🤖【智聊小精靈 - 關卡 A 終端機模擬對話模式】")
+        print("不用接 LINE、不用開穿透通道，直接在終端機與本地 Qwen 2.5 模型對話！")
+        print("輸入 'exit' 或 'quit' 即可離開。")
+        print("=" * 55 + "\n")
+        while True:
+            try:
+                user_input = input("你：").strip()
+                if not user_input:
+                    continue
+                if user_input.lower() in ["exit", "quit", "離開"]:
+                    break
+                print("\n[智聊小精靈思考中...]", flush=True)
+                reply = ask_ai_brain(user_input)
+                print(f"\n小精靈：\n{reply}\n")
+            except (KeyboardInterrupt, EOFError):
+                break
+        print("\n已結束終端機模擬模式。")
+        sys.exit(0)
+
     app.run(host="0.0.0.0", port=port, debug=True)
