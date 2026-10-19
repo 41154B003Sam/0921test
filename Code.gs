@@ -307,9 +307,11 @@ function askGeminiBrain(userMessage) {
   }
 
   const timeInfo = getCurrentTimeInfo();
+  // 即時聯網情資搜尋 (若使用者詢問颱風、天氣、地震、時事或最新資訊，自動擷取即時新聞作為背景知識)
+  const liveGrounding = fetchLiveGroundingContext(userMessage);
 
-  // 嚴謹的系統提示詞，包含 2026 真實時鐘錨定與長度排版規範
-  const systemInstruction = (
+  // 嚴謹的系統提示詞，包含 2026 真實時鐘錨定、即時聯網資訊與長度排版規範
+  let systemInstruction = (
     "你是一個聰明、熱心且幽默有禮的 LINE 個人智慧助理，名字叫做「智聊小精靈」。\n" +
     "你目前運行於 Google Apps Script 雲端環境，為使用者提供 24 小時不間斷的智慧陪伴。\n" +
     "【核心真實時間錨定】：\n" +
@@ -322,6 +324,14 @@ function askGeminiBrain(userMessage) {
     "2. 務必在限制長度內將語意完整表達完畢，以句號結束，切勿中途斷頭。\n" +
     "3. 請勿使用 Markdown 雙星號粗體標籤（例如 **文字**），請改用自然換行或 Emoji 呈現。"
   );
+
+  if (liveGrounding) {
+    systemInstruction += (
+      "\n\n【最新即時聯網新聞與氣象情報 (由小精靈即時從 Google 即時搜尋取得)】：\n" +
+      liveGrounding + "\n" +
+      "請務必參考上述最新聯網情報，精準、即時地回答使用者的問題（例如最新颱風動態、最新天氣、時事新聞等），千萬不要回答沒有颱風或無法連網！"
+    );
+  }
 
   // 支援的模型佇列：優先呼叫極速 (<1s)、零思維干擾且支援完整繁體中文的 flash-lite 系列，備援 preview/flash
   const candidateModels = [
@@ -466,6 +476,104 @@ function sendLineReply(replyToken, messageText) {
   } catch (err) {
     console.error("❌ LINE 發送例外: " + err);
   }
+}
+
+/**
+ * 依據使用者問題即時聯網取得台灣最新時事/氣象/新聞 (Google News RSS 即時情報聯網)
+ */
+function fetchLiveGroundingContext(userText) {
+  if (!userText) return "";
+  const lower = userText.toLowerCase();
+
+  let searchTopic = null;
+  if (lower.indexOf("颱風") !== -1 || lower.indexOf("風災") !== -1 || lower.indexOf("登陸") !== -1) {
+    searchTopic = "颱風 台灣";
+  } else if (lower.indexOf("停班") !== -1 || lower.indexOf("颱風假") !== -1 || lower.indexOf("放假") !== -1) {
+    searchTopic = "停班停課 颱風假 台灣";
+  } else if (lower.indexOf("地震") !== -1) {
+    searchTopic = "地震 台灣";
+  } else if (lower.indexOf("台股") !== -1 || lower.indexOf("股票") !== -1 || lower.indexOf("股市") !== -1) {
+    searchTopic = "台股 股市 台灣";
+  } else if (lower.indexOf("天氣") !== -1 || lower.indexOf("下雨") !== -1 || lower.indexOf("氣候") !== -1 || lower.indexOf("氣溫") !== -1 || lower.indexOf("降雨") !== -1) {
+    const cities = ["台北", "新北", "基隆", "桃園", "新竹", "苗栗", "台中", "彰化", "南投", "雲林", "嘉義", "台南", "高雄", "屏東", "宜蘭", "花蓮", "台東", "澎湖", "金門", "馬祖"];
+    let cityFound = "";
+    for (let i = 0; i < cities.length; i++) {
+      if (lower.indexOf(cities[i]) !== -1) {
+        cityFound = cities[i];
+        break;
+      }
+    }
+    searchTopic = (cityFound ? cityFound + " " : "") + "天氣 預報 台灣";
+  } else if (lower.indexOf("新聞") !== -1 || lower.indexOf("頭條") !== -1 || lower.indexOf("時事") !== -1 || lower.indexOf("即時") !== -1 || lower.indexOf("大事") !== -1) {
+    searchTopic = "即時新聞 台灣";
+  } else {
+    // 檢查是否有即時時事關鍵字
+    const realtimeTriggers = ["最新", "今天", "最近", "目前", "現在", "剛才"];
+    for (let i = 0; i < realtimeTriggers.length; i++) {
+      if (lower.indexOf(realtimeTriggers[i]) !== -1) {
+        const clean = userText.replace(/[請問如何有沒有甚麼什麼會嗎呢呀啊？\?\s]/g, "");
+        if (clean.length >= 2) {
+          searchTopic = clean.substring(0, 10) + " 台灣";
+        }
+        break;
+      }
+    }
+  }
+
+  if (!searchTopic) return "";
+
+  // 檢查快取 (快取 10 分鐘，節省流量並加速回覆)
+  const cacheKey = "NEWS_" + encodeURIComponent(searchTopic).replace(/%/g, "_").substring(0, 50);
+  const cache = CacheService.getScriptCache();
+  try {
+    const cachedNews = cache.get(cacheKey);
+    if (cachedNews) {
+      console.log("命中即時新聞快取: " + searchTopic);
+      return cachedNews;
+    }
+  } catch (cErr) {
+    // 忽略快取讀取錯誤
+  }
+
+  try {
+    const encodedTopic = encodeURIComponent(searchTopic);
+    const rssUrl = "https://news.google.com/rss/search?q=" + encodedTopic + "&hl=zh-TW&gl=TW&ceid=TW:zh-Hant";
+    const resp = UrlFetchApp.fetch(rssUrl, { muteHttpExceptions: true, followRedirects: true });
+    if (resp.getResponseCode() !== 200) return "";
+
+    const xmlText = resp.getContentText();
+    const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
+    let match;
+    const headlines = [];
+    let count = 0;
+    while ((match = itemRegex.exec(xmlText)) !== null && count < 5) {
+      const itemContent = match[1];
+      const titleMatch = itemContent.match(/<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/i);
+      const dateMatch = itemContent.match(/<pubDate>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/pubDate>/i);
+      if (titleMatch && titleMatch[1]) {
+        let title = titleMatch[1]
+          .replace(/&quot;/g, '"')
+          .replace(/&amp;/g, '&')
+          .replace(/&#39;/g, "'")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">");
+        headlines.push("• " + title + (dateMatch && dateMatch[1] ? " (" + dateMatch[1] + ")" : ""));
+        count++;
+      }
+    }
+
+    if (headlines.length > 0) {
+      const result = "【即時聯網搜尋情報 (主題：" + searchTopic + ")】\n" + headlines.join("\n");
+      try {
+        cache.put(cacheKey, result, 600); // 快取 10 分鐘
+      } catch (e) {}
+      console.log("成功擷取即時新聞: " + searchTopic + "，筆數: " + headlines.length);
+      return result;
+    }
+  } catch (err) {
+    console.warn("即時聯網新聞擷取失敗: " + err);
+  }
+  return "";
 }
 
 /**
