@@ -28,7 +28,7 @@ const CHANNEL_SECRET = SCRIPT_PROPERTIES.getProperty('CHANNEL_SECRET') || '';
 const GEMINI_API_KEY = SCRIPT_PROPERTIES.getProperty('GEMINI_API_KEY') || '';
 
 // 預設呼叫的 Gemini 模型名稱
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.1-flash-lite';
 
 // ==========================================
 // 2. Webhook 進入點 (doPost & doGet)
@@ -323,8 +323,13 @@ function askGeminiBrain(userMessage) {
     "3. 請勿使用 Markdown 雙星號粗體標籤（例如 **文字**），請改用自然換行或 Emoji 呈現。"
   );
 
-  // 支援的模型佇列：優先呼叫極速兼具充沛額度的 gemini-3.5-flash，備援 gemini-3-flash-preview / gemini-3.1-flash-lite-preview
-  const candidateModels = ['gemini-3.5-flash', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview'];
+  // 支援的模型佇列：優先呼叫極速 (<1s)、零思維干擾且支援完整繁體中文的 flash-lite 系列，備援 preview/flash
+  const candidateModels = [
+    'gemini-3.1-flash-lite',
+    'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite-preview',
+    'gemini-3.5-flash'
+  ];
 
   for (let i = 0; i < candidateModels.length; i++) {
     const model = candidateModels[i];
@@ -341,8 +346,8 @@ function askGeminiBrain(userMessage) {
         }
       ],
       "generationConfig": {
-        "temperature": 0.6,
-        "maxOutputTokens": 300
+        "temperature": 0.7,
+        "maxOutputTokens": 800
       }
     };
 
@@ -361,8 +366,22 @@ function askGeminiBrain(userMessage) {
       if (statusCode === 200 && resultJson.candidates && resultJson.candidates.length > 0) {
         const candidate = resultJson.candidates[0];
         if (candidate.content && candidate.content.parts && candidate.content.parts.length > 0) {
-          const rawText = candidate.content.parts[0].text;
-          return formatReplyText(rawText);
+          // 過濾排除思考鏈 (thought: true)，只提取真實對使用者的回覆內容
+          let extractedText = "";
+          for (let p = 0; p < candidate.content.parts.length; p++) {
+            const part = candidate.content.parts[p];
+            if (!part.thought && part.text) {
+              extractedText += part.text;
+            }
+          }
+          if (!extractedText && candidate.content.parts[0].text) {
+            extractedText = candidate.content.parts[0].text;
+          }
+
+          const formatted = formatReplyText(extractedText);
+          if (formatted) {
+            return formatted;
+          }
         }
       }
 
@@ -450,11 +469,20 @@ function sendLineReply(replyToken, messageText) {
 }
 
 /**
- * 移除 Markdown 雙星號 ** 並在句末標點符號安全截斷
+ * 清理 Markdown 標籤、防禦內部英文草稿洩漏並在句末安全截斷
  */
 function formatReplyText(text) {
   if (!text) return "";
   let clean = text.trim().replace(/\*\*/g, "");
+
+  // 防禦：檢查是否為模型內部洩漏的英文思考草稿 (例如 "standard response tailored for..." 或截斷的英文思考片段)
+  const hasChinese = /[\u4e00-\u9fa5]/.test(clean);
+  const looksLikeThoughtLeak = /^(standard response|thinking|tailored for|here is a|draft|exact city)/i.test(clean);
+  if (!hasChinese && (looksLikeThoughtLeak || clean.length < 150)) {
+    console.warn("偵測到疑似內部思考片段或非中文回覆，已略過此回應: " + clean.substring(0, 50));
+    return ""; // 回傳空字串讓外層迴圈調用下一個備援模型
+  }
+
   if (clean.length > 480) {
     let truncated = clean.substring(0, 475);
     const lastPunct = Math.max(
