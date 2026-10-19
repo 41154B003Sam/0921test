@@ -106,11 +106,27 @@ function handleLineEvent(event) {
     return;
   }
 
+  // 防重複處理 (LINE 重試機制去重)
+  const eventId = event.webhookEventId || event.replyToken;
+  if (eventId) {
+    const cache = CacheService.getScriptCache();
+    if (cache.get(eventId)) {
+      console.log("重複的事件已略過: " + eventId);
+      return;
+    }
+    cache.put(eventId, "1", 60);
+  }
+
   const replyToken = event.replyToken;
   const messageType = event.message.type;
+  const userId = event.source && event.source.userId;
 
   // 1. 文字訊息處理
   if (messageType === 'text') {
+    // 立即向使用者手機發送「正在輸入中動畫（3個跳動點）」
+    if (userId) {
+      sendLoadingAnimation(userId);
+    }
     handleTextMessage(event.message.text, replyToken);
     return;
   }
@@ -307,8 +323,8 @@ function askGeminiBrain(userMessage) {
     "3. 請勿使用 Markdown 雙星號粗體標籤（例如 **文字**），請改用自然換行或 Emoji 呈現。"
   );
 
-  // 支援的模型佇列：優先呼叫最新可用的 gemini-3.8-flash，備援 gemini-flash-latest / gemini-3.5-flash
-  const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.5-flash'];
+  // 支援的模型佇列：優先呼叫極速兼具充沛額度的 gemini-3.5-flash，備援 gemini-3-flash-preview / gemini-3.1-flash-lite-preview
+  const candidateModels = ['gemini-3.5-flash', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview'];
 
   for (let i = 0; i < candidateModels.length; i++) {
     const model = candidateModels[i];
@@ -325,8 +341,8 @@ function askGeminiBrain(userMessage) {
         }
       ],
       "generationConfig": {
-        "temperature": 0.7,
-        "maxOutputTokens": 1024
+        "temperature": 0.6,
+        "maxOutputTokens": 300
       }
     };
 
@@ -359,37 +375,36 @@ function askGeminiBrain(userMessage) {
   return "抱歉，小精靈的大腦剛剛連線稍微忙碌了一下，請稍候再問我一次喔！😄";
 }
 
-/**
- * 備援模型降級呼叫
- */
-function askGeminiFallback(userMessage, systemInstruction, fallbackModel) {
-  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + fallbackModel + ":generateContent?key=" + GEMINI_API_KEY;
-  const payload = {
-    "systemInstruction": { "parts": [{ "text": systemInstruction }] },
-    "contents": [{ "role": "user", "parts": [{ "text": userMessage }] }]
-  };
-  const options = {
-    "method": "post",
-    "contentType": "application/json",
-    "payload": JSON.stringify(payload),
-    "muteHttpExceptions": true
-  };
-
-  try {
-    const response = UrlFetchApp.fetch(url, options);
-    const resultJson = JSON.parse(response.getContentText());
-    if (resultJson.candidates && resultJson.candidates.length > 0) {
-      return formatReplyText(resultJson.candidates[0].content.parts[0].text);
-    }
-  } catch (e) {
-    console.error("備援模型呼叫亦失敗: " + e);
-  }
-  return "抱歉，AI 雲端服務目前連線稍繁忙，請稍候再試一次！";
-}
-
 // ==========================================
 // 5. LINE 回覆與工具函式
 // ==========================================
+
+/**
+ * 立即在使用者手機聊天室顯示「正在輸入... / 讀取中動畫 (Loading Animation)」
+ * 讓使用者立刻知道機器人有收到訊息並正在運算，0 秒即刻反饋
+ */
+function sendLoadingAnimation(chatId) {
+  if (!CHANNEL_ACCESS_TOKEN || !chatId) return;
+  const url = "https://api.line.me/v2/bot/chat/loading/start";
+  const payload = {
+    "chatId": chatId,
+    "loadingSeconds": 15
+  };
+  const options = {
+    "method": "post",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + CHANNEL_ACCESS_TOKEN
+    },
+    "payload": JSON.stringify(payload),
+    "muteHttpExceptions": true
+  };
+  try {
+    UrlFetchApp.fetch(url, options);
+  } catch (err) {
+    // 忽略動畫失敗
+  }
+}
 
 /**
  * 呼叫 LINE Messaging API Reply 訊息回覆端點
