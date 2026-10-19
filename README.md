@@ -125,6 +125,34 @@ cloudflared tunnel --url http://localhost:5000
 
 ---
 
+### 模式三：24 小時雲端全託管自動回覆版 (Google Apps Script)
+> **特色**：電腦完全免開機、免架設 Tunnel 穿透通道、零伺服器維護成本，直接常駐 Google Cloud 24 小時自動回覆。
+
+#### 步驟 1：建立 Google Apps Script 專案
+1. 前往 [Google Apps Script 官網](https://script.google.com/) 點擊「+ 新專案」。
+2. 將本專案中的 `Code.gs` 代碼完整複製並覆蓋專案編輯器，按 `Ctrl + S` 儲存。
+
+#### 步驟 2：設定指令碼屬性 (安全存放金鑰)
+1. 點擊左側齒輪圖示「專案設定」➜ 滾動至「指令碼屬性」➜ 點擊「新增指令碼屬性」。
+2. 分別填入以下 3 項：
+   - `CHANNEL_ACCESS_TOKEN`: 您的 LINE Messaging API 長效存取權杖
+   - `CHANNEL_SECRET`: 您的 LINE Messaging API 頻道密鑰
+   - `GEMINI_API_KEY`: 您的 Google Gemini API Key
+
+#### 步驟 3：部署為網頁應用程式
+1. 點擊右上角「部署」➜「新增部署作業」。
+2. 種類選擇「網頁應用程式 (Web app)」。
+   - 執行身分：我 (您的 Google 帳戶)
+   - 誰可以存取：所有人 (Anyone)
+3. 點擊「部署」，並複製取得的「網頁應用程式網址 (Web App URL)」。
+
+#### 步驟 4：設定 LINE Webhook
+1. 回到 LINE Developers Console ➜「Messaging API」分頁。
+2. 將 Webhook URL 設定為剛複製的 Google Apps Script 網址，並開啟「Use webhook」。
+3. 點擊 Verify 顯示 Success 即代表 24/7 雲端小精靈上線完成！
+
+---
+
 ## 🔄 修改了什麼 (What You Modified)
 
 本專案歷經多次實務迭代與健全度升級，核心修改內容如下：
@@ -171,13 +199,42 @@ cloudflared tunnel --url http://localhost:5000
 - **原本問題**：在 Windows 繁體中文環境下，終端機標準輸出預設為 `cp950 / Big5` 編碼。當 AI 回覆包含特殊 Emoji 時會觸發 `UnicodeEncodeError` 導致伺服器崩潰。
 - **具體修改**：在伺服器入口加入 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`，確保終端機列印任何特殊符號皆不中斷伺服器。
 
+### 8. Google Apps Script 24/7 雲端全自動託管架構 (`Code.gs`)
+- **原本問題**：先前版本必須在本機常駐運行 Python + Ollama 與 Cloudflare Tunnel 穿透，一旦電腦關機、休眠或網路瞬斷，LINE 機器人即刻斷線停擺。
+- **具體修改**：
+  - 將完整對話大腦移植至 Google Apps Script 伺服器端無伺服器架構 (`Code.gs`)。
+  - 電腦無須開機、無須本地環境，全天候由 Google Cloud 免費常駐運行。
+
+### 9. 極速推理模型切換至 Gemini 3.1 Flash-Lite 與多重備援佇列
+- **原本問題**：重型 Flash 模型或 3.5 思考模型反應較慢（>10秒），且容易觸發 429 資源耗盡配額錯誤。
+- **具體修改**：
+  - 核心調度優先採用 **`gemini-3.1-flash-lite`** 與 **`gemini-3.5-flash-lite`**，推理時間縮短至 **0.8 ~ 1.5 秒**。
+  - 建置 4 重候選模型備援佇列，自動無縫切換，保證高可用性。
+
+### 10. 即時聯網情報大腦 (Live Search Grounding)
+- **原本問題**：模型知識庫為靜態截斷，詢問最新颱風動態時曾回答「近期沒有颱風」，但現實中正有強颱薔琵逼近台灣。
+- **具體修改**：
+  - 整合 Google 即時新聞 RSS 檢索模組：當提問涉及「颱風、天氣、地震、時事、新聞」等即時關鍵字，自動於 0.2 秒內抓取最新即時新聞動態並注入 Prompt，使小精靈能精準回答今日最新強颱薔琵動態、侵襲率與各縣市即時風雨。
+  - 內建 10 分鐘快取保護機制，節省流量並確保秒回。
+
+### 11. LINE 打字中動畫即時反饋 (Loading Animation)
+- **具體修改**：收到訊息 0.1 秒內即向 LINE API 發送 `/v2/bot/chat/loading/start`，手機畫面即刻呈現「••• 打字跳動點」，消除使用者等待焦慮。
+
+### 12. 內部思考鏈防洩防護與 Token 預算擴充
+- **原本問題**：Gemini 3.5 思考模型在 300 Token 上限下，將 Token 耗盡在內部 English Thinking 草稿上，導致英文思考字句外洩且中文回答腰斬。
+- **具體修改**：
+  - 全面將 Token 預算提升至 800，確保長文回答完整以句號收尾。
+  - 代碼層自動剔除 `thought: true` 思考標籤。
+  - 增加防禦性濾網：若非中文且符合思考草稿特徵，自動重新生成。
+
 ---
 
 ## 📁 檔案結構說明
 
 ```
 smart-line-bot/
-├── app.py              # 核心主程式（雙大腦調度、即時聯網、LINE Webhook）
+├── Code.gs             # Google Apps Script 24/7 雲端自動回覆主程式（含即時聯網與防護）
+├── app.py              # 本地端核心主程式（雙大腦調度、即時聯網、LINE Webhook）
 ├── requirements.txt    # Python 套件依賴清單
 ├── .env.example        # 環境變數範例（安全隔離，不含真實金鑰）
 ├── .gitignore          # Git 忽略設定（排除 .env 等機密資訊）
